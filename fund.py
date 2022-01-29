@@ -1,8 +1,12 @@
 import struct
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timezone, timedelta
 import pytz
 import requests
 from bs4 import BeautifulSoup
+
+import database
+from helpers import days_between, convert_date
 
 
 class Fund:
@@ -18,6 +22,7 @@ class Fund:
     market_share: float
     returns = {'last_month': float, 'last_3_months': float, 'last_6_months': float, 'last_year': float}
     historical_prices = []
+    formatted_prices = []
     page: str
     base_url = 'https://www.tefas.gov.tr'  # http://www.fundturkey.com.tr also possible
     info_endpoint = "/api/DB/BindHistoryInfo"
@@ -54,13 +59,35 @@ class Fund:
         url = self.base_url + self.info_endpoint
         payload = 'fontip=YAT&fonkod=' + self.code + '&bastarih=' + starting_date + '&bittarih=' + ending_date
         response = requests.request("POST", url, headers=self.headers, data=payload)
-        # print(response.text)
         price_data = response.json().get('data', {})
-        formatted_prices = {}
         for price in price_data:
             # convert unix timestamp to date
             # get first 10 digits of string
             date = datetime.fromtimestamp(int(price['TARIH'][:10]), pytz.timezone("Europe/Istanbul")).strftime(
                 '%d-%m-%Y')
-            formatted_prices[date] = price['FIYAT']
+            self.formatted_prices.append({'date': date, 'price': price['FIYAT']})
+            database.add_fund_price(database.get_fund_id(self.code), price['FIYAT'], convert_date(date))
+        return self.formatted_prices
+
+    def get_prices_from(self, starting_date: str):
+        today = datetime.now(timezone.utc).strftime('%d.%m.%Y')
+        days = days_between(starting_date, today)
+        formatted_prices = []
+        start_date = starting_date
+        end_date = (datetime.strptime(starting_date, '%d.%m.%Y') + timedelta(days=60)).strftime('%d.%m.%Y')
+        while days > 0:
+            new_prices = self.get_historical_prices(start_date, end_date)
+            formatted_prices += new_prices
+            start_date = end_date
+            end_date = (datetime.strptime(start_date, '%d.%m.%Y') + timedelta(days=60)).strftime('%d.%m.%Y')
+            days -= 60
+            time.sleep(1)
         return formatted_prices
+
+    def save_prices(self, prices):
+        import csv
+        field_names = ['date', 'price']
+        with open(self.code+'.csv', 'w') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=field_names)
+            writer.writeheader()
+            writer.writerows(prices)
